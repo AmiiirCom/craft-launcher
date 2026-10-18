@@ -235,7 +235,15 @@ impl Http {
         }
     }
 
-    fn fetch_parallel(&self, url: &str, part: &Path, meta: &Path, size: u64, stop: &Stop, progress: &mut dyn FnMut(Transfer)) -> Result<(), AttemptError> {
+    fn fetch_parallel(
+        &self,
+        url: &str,
+        part: &Path,
+        meta: &Path,
+        size: u64,
+        stop: &Stop,
+        progress: &mut dyn FnMut(Transfer),
+    ) -> Result<(), AttemptError> {
         let file = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
@@ -246,7 +254,7 @@ impl Http {
         file.set_len(size).map_err(|e| AttemptError::Fatal(format!("couldn't pre-allocate file ({e})")))?;
 
         let num_chunks = PARALLEL_CHUNKS;
-        let chunk_size = (size + num_chunks as u64 - 1) / num_chunks as u64;
+        let chunk_size = size.div_ceil(num_chunks as u64);
         let initial_progress = load_meta(meta, num_chunks, size).unwrap_or_else(|| vec![0u64; num_chunks]);
         let chunk_dones: Vec<AtomicU64> = initial_progress.iter().map(|&d| AtomicU64::new(d)).collect();
         let initial_total: u64 = initial_progress.iter().sum();
@@ -255,33 +263,36 @@ impl Http {
         let range_unsupported = AtomicBool::new(false);
         let fatal_error = std::sync::Mutex::new(None);
 
+        let shared = WorkerShared {
+            agent: &self.download,
+            url,
+            file: &file,
+            total_downloaded: &total_downloaded,
+            stop_flag: &stop_flag,
+            range_unsupported: &range_unsupported,
+        };
+
         let res: Result<(), AttemptError> = std::thread::scope(|s| {
             for (i, done_atomic) in chunk_dones.iter().enumerate() {
                 let start = i as u64 * chunk_size;
                 let end = ((i as u64 + 1) * chunk_size).min(size);
                 let done = done_atomic.load(Ordering::Relaxed);
-                let agent = &self.download;
-                let file_ref = &file;
-                let total_ref = &total_downloaded;
-                let stop_ref = &stop_flag;
-                let range_unsupported_ref = &range_unsupported;
+                let task = ChunkTask { start, end, done, chunk_done: done_atomic };
+                let shared_ref = &shared;
                 let fatal_ref = &fatal_error;
+                let stop_ref = &stop_flag;
 
                 s.spawn(move || {
-                    if start + done >= end {
+                    if task.start + task.done >= task.end {
                         return;
                     }
-                    if let Err(err) = run_worker(agent, url, file_ref, start, end, done, done_atomic, total_ref, stop_ref, range_unsupported_ref) {
-                        match err {
-                            AttemptError::Fatal(msg) => {
-                                let mut lock = fatal_ref.lock().unwrap();
-                                if lock.is_none() {
-                                    *lock = Some(msg);
-                                }
-                                stop_ref.store(true, Ordering::Relaxed);
+                    if let Err(AttemptError::Fatal(msg)) = run_worker(task, shared_ref) {
+                        if let Ok(mut lock) = fatal_ref.lock() {
+                            if lock.is_none() {
+                                *lock = Some(msg);
                             }
-                            _ => {}
                         }
+                        stop_ref.store(true, Ordering::Relaxed);
                     }
                 });
             }
@@ -298,7 +309,7 @@ impl Http {
                     stop_flag.store(true, Ordering::Relaxed);
                     return Err(AttemptError::RangeNotSupported);
                 }
-                if let Some(msg) = fatal_error.lock().unwrap().clone() {
+                if let Some(msg) = fatal_error.lock().ok().and_then(|g| g.clone()) {
                     stop_flag.store(true, Ordering::Relaxed);
                     return Err(AttemptError::Fatal(msg));
                 }
@@ -494,39 +505,45 @@ impl Http {
     }
 }
 
-fn run_worker(
-    agent: &ureq::Agent,
-    url: &str,
-    file: &std::fs::File,
+struct ChunkTask<'a> {
     start: u64,
     end: u64,
-    initial_done: u64,
-    chunk_done: &AtomicU64,
-    total_downloaded: &AtomicU64,
-    stop_flag: &AtomicBool,
-    range_unsupported: &AtomicBool,
-) -> Result<(), AttemptError> {
-    let mut have = initial_done;
+    done: u64,
+    chunk_done: &'a AtomicU64,
+}
+
+struct WorkerShared<'a> {
+    agent: &'a ureq::Agent,
+    url: &'a str,
+    file: &'a std::fs::File,
+    total_downloaded: &'a AtomicU64,
+    stop_flag: &'a AtomicBool,
+    range_unsupported: &'a AtomicBool,
+}
+
+fn run_worker(task: ChunkTask<'_>, shared: &WorkerShared<'_>) -> Result<(), AttemptError> {
+    let mut have = task.done;
     let mut fruitless = 0;
     let mut buf = vec![0u8; 128 * 1024];
 
-    while start + have < end {
-        if stop_flag.load(Ordering::Relaxed) || range_unsupported.load(Ordering::Relaxed) {
+    while task.start + have < task.end {
+        if shared.stop_flag.load(Ordering::Relaxed) || shared.range_unsupported.load(Ordering::Relaxed) {
             return Ok(());
         }
         if fruitless >= MAX_FRUITLESS_ATTEMPTS {
-            return Err(AttemptError::Retry {
-                error: "worker reached max retries".into(),
-                progressed: false,
-            });
+            return Err(AttemptError::Retry { error: "worker reached max retries".into(), progressed: false });
         }
         if fruitless > 0 {
             std::thread::sleep(Duration::from_millis(200 * (1 << fruitless.min(4))));
         }
 
-        let req_start = start + have;
-        let req_end = end - 1;
-        let req = agent.get(url).header("Accept-Encoding", "identity").header("Range", &format!("bytes={req_start}-{req_end}"));
+        let req_start = task.start + have;
+        let req_end = task.end - 1;
+        let req = shared
+            .agent
+            .get(shared.url)
+            .header("Accept-Encoding", "identity")
+            .header("Range", &format!("bytes={req_start}-{req_end}"));
 
         let mut resp = match req.call() {
             Ok(r) => r,
@@ -538,7 +555,7 @@ fn run_worker(
 
         let status = resp.status().as_u16();
         if status == 200 {
-            range_unsupported.store(true, Ordering::Relaxed);
+            shared.range_unsupported.store(true, Ordering::Relaxed);
             return Err(AttemptError::RangeNotSupported);
         }
         if status == 404 || status == 410 {
@@ -549,12 +566,12 @@ fn run_worker(
             continue;
         }
 
-        let limit = (end - req_start).saturating_add(64 * 1024);
+        let limit = (task.end - req_start).saturating_add(64 * 1024);
         let mut reader = resp.body_mut().with_config().limit(limit).reader();
         let mut made_progress = false;
 
         loop {
-            if stop_flag.load(Ordering::Relaxed) || range_unsupported.load(Ordering::Relaxed) {
+            if shared.stop_flag.load(Ordering::Relaxed) || shared.range_unsupported.load(Ordering::Relaxed) {
                 return Ok(());
             }
             let n = match reader.read(&mut buf) {
@@ -562,20 +579,20 @@ fn run_worker(
                 Ok(n) => n,
                 Err(_) => break,
             };
-            let n = n.min((end - (start + have)) as usize);
+            let n = n.min((task.end - (task.start + have)) as usize);
             if n == 0 {
                 break;
             }
-            if let Err(e) = write_at(file, &buf[..n], start + have) {
+            if let Err(e) = write_at(shared.file, &buf[..n], task.start + have) {
                 return Err(AttemptError::Fatal(format!("disk write error: {e}")));
             }
             have += n as u64;
-            chunk_done.store(have, Ordering::Relaxed);
-            total_downloaded.fetch_add(n as u64, Ordering::Relaxed);
+            task.chunk_done.store(have, Ordering::Relaxed);
+            shared.total_downloaded.fetch_add(n as u64, Ordering::Relaxed);
             made_progress = true;
         }
 
-        if start + have >= end {
+        if task.start + have >= task.end {
             return Ok(());
         }
         fruitless = if made_progress { 0 } else { fruitless + 1 };
@@ -621,7 +638,7 @@ fn load_meta(path: &Path, num_chunks: usize, size: u64) -> Option<Vec<u64>> {
         return None;
     }
     let mut progress = Vec::with_capacity(num_chunks);
-    let chunk_size = (size + num_chunks as u64 - 1) / num_chunks as u64;
+    let chunk_size = size.div_ceil(num_chunks as u64);
     for i in 0..num_chunks {
         let start = 4 + i * 8;
         let d = u64::from_le_bytes(bytes[start..start + 8].try_into().ok()?);
@@ -648,8 +665,11 @@ fn save_meta(path: &Path, chunk_dones: &[AtomicU64]) {
 /// Attempts in a row without any new bytes before pausing (about two minutes of backoff).
 const MAX_FRUITLESS_ATTEMPTS: u32 = 3;
 /// The longest one request may spend receiving; the next request resumes.
+/// Kept large so a healthy download finishes on a single connection; a stalled one is
+/// caught by `IDLE_TIMEOUT` long before this.
 const ATTEMPT_BODY_TIME: Duration = Duration::from_secs(30 * 60);
 /// How long `attempt` tolerates zero bytes before treating the connection as dead.
+/// Shorter than typical carrier NAT timeouts, long enough for a very slow but live link.
 const IDLE_TIMEOUT: Duration = Duration::from_secs(45);
 /// Backstop when the server doesn't say how big the file is.
 const MAX_DOWNLOAD: u64 = 16 << 30;
@@ -768,10 +788,7 @@ enum AttemptError {
     Stopped(String),
     Fatal(String),
     RangeNotSupported,
-    Retry {
-        error: String,
-        progressed: bool,
-    },
+    Retry { error: String, progressed: bool },
 }
 
 /// `<dest>.<size>.part`: where an unfinished download of `dest` is kept.
