@@ -201,6 +201,7 @@ impl Http {
                     Ok(()) => Ok(()),
                     Err(AttemptError::RangeNotSupported) => {
                         let _ = std::fs::remove_file(&meta);
+                        let _ = std::fs::remove_file(&part);
                         self.fetch_resuming(url, &part, size, stop, progress)
                     }
                     Err(AttemptError::Stopped(e)) => Err(e),
@@ -266,6 +267,7 @@ impl Http {
         let shared = WorkerShared {
             agent: &self.download,
             url,
+            size,
             file: &file,
             total_downloaded: &total_downloaded,
             stop_flag: &stop_flag,
@@ -515,6 +517,7 @@ struct ChunkTask<'a> {
 struct WorkerShared<'a> {
     agent: &'a ureq::Agent,
     url: &'a str,
+    size: u64,
     file: &'a std::fs::File,
     total_downloaded: &'a AtomicU64,
     stop_flag: &'a AtomicBool,
@@ -564,6 +567,17 @@ fn run_worker(task: ChunkTask<'_>, shared: &WorkerShared<'_>) -> Result<(), Atte
         if status != 206 {
             fruitless += 1;
             continue;
+        }
+
+        let valid_range = resp
+            .headers()
+            .get("content-range")
+            .and_then(|v| v.to_str().ok())
+            .and_then(parse_content_range)
+            .is_some_and(|(start, total)| start == req_start && total.map_or(true, |t| t == shared.size));
+        if !valid_range {
+            shared.range_unsupported.store(true, Ordering::Relaxed);
+            return Err(AttemptError::RangeNotSupported);
         }
 
         let limit = (task.end - req_start).saturating_add(64 * 1024);
