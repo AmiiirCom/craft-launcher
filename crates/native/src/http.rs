@@ -245,6 +245,7 @@ impl Http {
         stop: &Stop,
         progress: &mut dyn FnMut(Transfer),
     ) -> Result<(), AttemptError> {
+        let resumable_part = std::fs::metadata(part).is_ok_and(|m| m.is_file() && m.len() == size);
         let file = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
@@ -256,7 +257,12 @@ impl Http {
 
         let num_chunks = PARALLEL_CHUNKS;
         let chunk_size = size.div_ceil(num_chunks as u64);
-        let initial_progress = load_meta(meta, num_chunks, size).unwrap_or_else(|| vec![0u64; num_chunks]);
+        let initial_progress = if resumable_part {
+            load_meta(meta, num_chunks, size).unwrap_or_else(|| vec![0u64; num_chunks])
+        } else {
+            let _ = std::fs::remove_file(meta);
+            vec![0u64; num_chunks]
+        };
         let chunk_dones: Vec<AtomicU64> = initial_progress.iter().map(|&d| AtomicU64::new(d)).collect();
         let initial_total: u64 = initial_progress.iter().sum();
         let total_downloaded = AtomicU64::new(initial_total);
@@ -739,14 +745,21 @@ fn matches_published(path: &Path, sha256: &str) -> bool {
 
 /// How much of a download is already on disk (a paused or interrupted one).
 pub fn partial_bytes(dest: &Path, size: u64) -> Option<u64> {
-    let meta_p = meta_path(dest, size);
-    if let Some(prog) = load_meta(&meta_p, PARALLEL_CHUNKS, size) {
-        let sum: u64 = prog.iter().sum();
-        if sum > 0 {
-            return Some(sum);
+    let part = part_path(dest, size);
+    let part_meta = std::fs::metadata(&part).ok()?;
+    if !part_meta.is_file() {
+        return None;
+    }
+    if part_meta.len() == size {
+        let meta_p = meta_path(dest, size);
+        if let Some(prog) = load_meta(&meta_p, PARALLEL_CHUNKS, size) {
+            let sum: u64 = prog.iter().sum();
+            if sum > 0 {
+                return Some(sum);
+            }
         }
     }
-    std::fs::metadata(part_path(dest, size)).ok().map(|m| m.len()).filter(|n| *n > 0)
+    (part_meta.len() > 0).then_some(part_meta.len())
 }
 
 /// Sets a file's modification time to now.
