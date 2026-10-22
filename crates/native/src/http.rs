@@ -762,6 +762,25 @@ pub fn partial_bytes(dest: &Path, size: u64) -> Option<u64> {
     (part_meta.len() > 0).then_some(part_meta.len())
 }
 
+/// Renames `from` to `to`, retrying for a few seconds while Windows reports the file busy: an
+/// antivirus scanner often holds a just-written installer open, and the rename then fails with
+/// "Access denied" (os error 5) or a sharing violation (os error 32). `stop` pauses or cancels
+/// it between tries.
+fn rename_retrying(from: &Path, to: &Path, stop: &Stop) -> Result<(), String> {
+    let mut wait = Duration::from_millis(100);
+    loop {
+        stop.check()?;
+        match std::fs::rename(from, to) {
+            Err(e) if cfg!(windows) && matches!(e.raw_os_error(), Some(5 | 32)) && wait <= Duration::from_secs(4) => {
+                log::info!("{} is busy ({e}); retrying the rename", to.display());
+                std::thread::sleep(wait);
+                wait = wait.saturating_mul(2);
+            }
+            result => return result.map_err(|e| format!("couldn't save the download ({e})")),
+        }
+    }
+}
+
 /// Sets a file's modification time to now.
 fn touch(path: &Path) -> bool {
     std::fs::File::options().write(true).open(path).and_then(|f| f.set_modified(std::time::SystemTime::now())).is_ok()

@@ -276,7 +276,7 @@ checksum = "d3fb67a6e08acf24fdeccbac2cb6ac4305825bd1f117462e0e6f2f193345ad56"
 
 [[package]]
 name = "artcraft-launcher"
-version = "0.5.1"
+version = "0.6.1"
 dependencies = [
  "artcraft-launcher-core",
  "artcraft-launcher-native",
@@ -301,8 +301,9 @@ dependencies = [
 
 [[package]]
 name = "artcraft-launcher-core"
-version = "0.5.1"
+version = "0.6.1"
 dependencies = [
+ "jiff",
  "semver",
  "serde",
  "serde_json",
@@ -310,7 +311,7 @@ dependencies = [
 
 [[package]]
 name = "artcraft-launcher-native"
-version = "0.5.1"
+version = "0.6.1"
 dependencies = [
  "artcraft-launcher-core",
  "dirs 6.0.0",
@@ -325,28 +326,32 @@ dependencies = [
  "tempfile",
  "ureq",
  "winreg",
+ "winsafe",
  "zip",
 ]
 
 [[package]]
 name = "artcraft-launcher-ui-egui"
-version = "0.5.1"
+version = "0.6.1"
 dependencies = [
  "artcraft-launcher-core",
  "egui",
  "egui_extras",
  "egui_kittest",
  "image",
+ "jiff",
+ "js-sys",
  "log",
  "serde",
  "serde_json",
  "skrifa",
  "sys-locale",
+ "wasm-bindgen",
 ]
 
 [[package]]
 name = "artcraft-launcher-web"
-version = "0.5.1"
+version = "0.6.1"
 dependencies = [
  "artcraft-launcher-core",
  "artcraft-launcher-ui-egui",
@@ -2365,10 +2370,12 @@ dependencies = [
  "defmt",
  "jiff-core",
  "jiff-static",
+ "jiff-tzdb-platform",
  "log",
  "portable-atomic",
  "portable-atomic-util",
  "serde_core",
+ "windows-link",
 ]
 
 [[package]]
@@ -2391,6 +2398,21 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "jiff-tzdb"
+version = "0.1.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fa8377070c6bae868759445e5a77f66d84f0b72f3a054bfb00e6d038b8282da7"
+
+[[package]]
+name = "jiff-tzdb-platform"
+version = "0.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "875a5a69ac2bab1a891711cf5eccbec1ce0341ea805560dcd90b7a2e925132e8"
+dependencies = [
+ "jiff-tzdb",
 ]
 
 [[package]]
@@ -5762,6 +5784,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "winsafe"
+version = "0.0.29"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9ef0ffc427f045c0cc9ebffd6f4f91153dcd2a1547b5c3c29ee3f541e16e95c6"
+
+[[package]]
 name = "wit-bindgen"
 version = "0.57.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5854,7 +5882,10 @@ checksum = "ec7a2a501ed189703dba8b08142f057e887dfc4b2cc4db2d343ac6376ba3e0b9"
 
 [[package]]
 name = "xtask"
-version = "0.5.1"
+version = "0.6.1"
+dependencies = [
+ "jiff",
+]
 
 [[package]]
 name = "yoke"
